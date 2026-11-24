@@ -46,4 +46,7 @@ describe('keep lab', () => {
   test('lab 29', () => {
     expect(isString('29')).toBe(true)
   })
+  test('lab 31', () => {
+    expect(isString('31')).toBe(true)
+  })
 })
