@@ -72,6 +72,7 @@ import {
   resolveTransitionChild,
   resolveTransitionHooks as resolveVNodeTransitionHooks,
   restoreCurrentInstance,
+  resumeKeepAliveEntry,
   setCurrentInstance,
   setCurrentRenderingInstance,
   setTransitionHooks as setVNodeTransitionHooks,
@@ -1181,10 +1182,13 @@ const vaporInteropImpl = {
     if (shouldUpdate) {
       updateInteropVNode(instance, vnodeHookState, vnode, cached)
     }
+    // the catch-up can empty the root, which then starts on a new anchor
+    const failure = resumeKeepAliveEntry(instance)
     const startAnchor = componentStartAnchors.get(instance)
     if (startAnchor) insert(startAnchor, container, anchor)
     activate(instance, container, anchor, parentSuspense)
     insert(vnode.anchor as any, container, anchor)
+    if (failure) throw failure.error
   },
 
   deactivate(vnode, container: ParentNode, parentSuspense) {
@@ -1798,6 +1802,7 @@ function mountVNode(
   let isDomPending = false
   // the vnode's keep-alive flag outlives the activation, and place() also moves
   let isDeactivated = false
+  let hasDeferredPatch = false
   const unmount = (parentNode?: ParentNode, transition?: TransitionHooks) => {
     // scope disposal and block removal can both reach this
     if (isUnmounted) {
@@ -1886,15 +1891,26 @@ function mountVNode(
     const operationSuspense = suspense
     if (isKeepAliveEnabled && isDeactivated) {
       isDeactivated = false
+      const isVaporPage = (vnode.type as any).__vapor
+      const deferred = hasDeferredPatch
+      hasDeferredPatch = false
+      // a vdom page activates on the fresh vnode it was handed while paused,
+      // which renders it once with what it missed
+      if (deferred && !isVaporPage) {
+        const previous = replaceVNode(withExtraProps(baseVNode))
+        vnode.el = previous.el
+        vnode.component = previous.component
+      }
       // entering under the hooks resolved for this switch, as vdom sets them
       // on every render: an in-out leave handed to them runs after the enter
       if (isTransitionEnabled && transition) {
         setVNodeTransitionHooks(vnode, transition)
       }
       if (frag.inputScope) frag.inputScope.resume()
-      if ((vnode.type as any).__vapor) {
+      if (isVaporPage) {
         activate(vnode.component as any, parentNode, anchor, operationSuspense)
         insert(vnode.anchor as Node, parentNode, anchor)
+        if (deferred) updateUntracked()
       } else {
         vdomActivate(
           vnode,
@@ -1969,6 +1985,32 @@ function mountVNode(
     // merging the extra props reads them, which the effect below tracks
     const next = withExtraProps(baseVNode)
     if (!mountedParentNode) return
+    const previous = replaceVNode(next)
+    const prevInstance = currentInstance
+    simpleSetCurrentInstance(null)
+    internals.p(
+      previous,
+      vnode,
+      mountedParentNode,
+      mountedAnchor,
+      parentComponent as any,
+      suspense,
+      namespace,
+      frag.slotScopeIds,
+    )
+    simpleSetCurrentInstance(prevInstance)
+    syncNodes()
+  }
+  // the caller's effect tracks only its vnode; extra props track their own
+  const updateUntracked = () => {
+    const prevSub = setActiveSub()
+    try {
+      update()
+    } finally {
+      setActiveSub(prevSub)
+    }
+  }
+  const replaceVNode = (next: VNode): VNode => {
     const previous = vnode
     // Like a vdom parent re-rendering it, the fresh vnode gets what vapor set
     // on the mounted one after creation; every such writer belongs here.
@@ -1988,20 +2030,7 @@ function mountVNode(
     trackFragmentVNodeUpdates(frag, vnode, syncNodes)
     frag.vnode = vnode
     frag.$key = vnodeKeyOf(vnode)
-    const prevInstance = currentInstance
-    simpleSetCurrentInstance(null)
-    internals.p(
-      previous,
-      vnode,
-      mountedParentNode,
-      mountedAnchor,
-      parentComponent as any,
-      suspense,
-      namespace,
-      frag.slotScopeIds,
-    )
-    simpleSetCurrentInstance(prevInstance)
-    syncNodes()
+    return previous
   }
   // `<component :is="vnode">` handing down a fresh vnode of its branch:
   // patch it into the mounted one, the way VDOM diffs it. A KeepAlive hit can
@@ -2010,12 +2039,11 @@ function mountVNode(
   frag.patchVNode = next => {
     if (next.type !== baseVNode.type) return
     baseVNode = next
-    // the caller's effect tracks only its vnode; extra props track their own
-    const prevSub = setActiveSub()
-    try {
-      update()
-    } finally {
-      setActiveSub(prevSub)
+    // a paused page catches up first: activation patches it in
+    if (isDeactivated) {
+      hasDeferredPatch = true
+    } else {
+      updateUntracked()
     }
   }
 
@@ -2087,6 +2115,7 @@ function createVDOMComponent(
   const useBridge = shouldUseRendererBridge(component)
   const comp = useBridge ? ensureRendererBridge(component) : component
   let propsInstance: VaporComponentInstance | undefined
+  let inputEffect: RenderEffect | undefined
   let rawValues: Record<string, any> = EMPTY_OBJ
   let rawRef: VNodeNormalizedRef | null | undefined
   let shouldRefreshRef = false
@@ -2119,7 +2148,7 @@ function createVDOMComponent(
       rawValues = collectInputs((rawProps || EMPTY_OBJ) as RawProps, cells)
       if (cells) deliverInputs(undefined, undefined, cells)
     } else {
-      const effect = new RenderEffect(() => {
+      const effect = (inputEffect = new RenderEffect(() => {
         const prevInner = setCurrentInstance(parentComponent, inputScope)
         try {
           rawValues = collectProps(
@@ -2156,7 +2185,7 @@ function createVDOMComponent(
             vnode.component!.update()
           }
         }
-      }, true)
+      }, true))
       effect.run()
       // every getter and descriptor turned out to be constant
       if (!effect.deps) {
@@ -2373,8 +2402,10 @@ function createVDOMComponent(
     if (isKeepAliveEnabled && isDeactivated) {
       isDeactivated = false
       // An activated child re-enters with the inputs its parent holds now, so
-      // catch the commit up with the sources before activating.
+      // catch the commit up with the sources before activating: its own
+      // catch-up then renders them.
       if (frag.inputScope) frag.inputScope.resume()
+      if (inputEffect && inputEffect.job) inputEffect.job()
       // entering under the hooks resolved for this switch, as vdom sets them
       // on every render: an in-out leave handed to them runs after the enter
       if (isTransitionEnabled && transition) {

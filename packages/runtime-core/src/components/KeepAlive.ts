@@ -52,6 +52,11 @@ import { type SuspenseBoundary, isSuspense } from './Suspense'
 import { LifecycleHooks } from '../enums'
 import { type SchedulerJob, SchedulerJobFlags } from '../scheduler'
 import { isVaporInteropEnabled } from '../vaporInteropState'
+import {
+  pauseKeepAliveEntry,
+  requestPauseKeepAliveEntry,
+  resumeKeepAliveEntry,
+} from '../keepAlivePause'
 
 type MatchPattern = string | RegExp | (string | RegExp)[]
 
@@ -508,6 +513,25 @@ export function activate(
   optimized?: boolean,
 ): void {
   const instance = vnode.component!
+  // What it missed renders with the new vnode, once and in the storage
+  // container, so it enters on its final root. A cache hit carries no
+  // transition hooks: it renders under the ones it left with.
+  const transition = vnode.transition
+  if (!transition) vnode.transition = instance.vnode.transition
+  const failure = resumeKeepAliveEntry(instance, () =>
+    patch(
+      instance.vnode,
+      vnode,
+      container,
+      anchor,
+      instance,
+      parentSuspense,
+      namespace,
+      vnode.slotScopeIds,
+      optimized,
+    ),
+  )
+  vnode.transition = transition
   move(
     vnode,
     container,
@@ -515,18 +539,6 @@ export function activate(
     MoveType.ENTER,
     parentComponent,
     parentSuspense,
-  )
-  // in case props have changed
-  patch(
-    instance.vnode,
-    vnode,
-    container,
-    anchor,
-    instance,
-    parentSuspense,
-    namespace,
-    vnode.slotScopeIds,
-    optimized,
   )
   queuePostRenderEffect(
     () => {
@@ -547,6 +559,7 @@ export function activate(
     // Update components tree
     devtoolsComponentAdded(instance)
   }
+  if (failure) throw failure.error
 }
 
 /**
@@ -564,6 +577,7 @@ export function deactivate(
   invalidateMount(instance.a)
 
   move(vnode, container, null, MoveType.LEAVE, parentComponent, parentSuspense)
+  requestPauseKeepAliveEntry(instance)
   queuePostRenderEffect(
     () => {
       if (instance.da) {
@@ -574,6 +588,7 @@ export function deactivate(
         invokeVNodeHook(vnodeHook, instance.parent, vnode)
       }
       instance.isDeactivated = true
+      pauseKeepAliveEntry(instance)
     },
     undefined,
     parentSuspense,

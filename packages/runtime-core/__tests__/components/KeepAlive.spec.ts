@@ -1,14 +1,20 @@
 import {
+  BaseTransition,
   type Component,
   type ComponentOptions,
   type ComponentPublicInstance,
   KeepAlive,
   type Ref,
+  Suspense,
+  Teleport,
   type TestElement,
+  type VNode,
   cloneVNode,
   createApp,
   defineAsyncComponent,
   defineComponent,
+  effect,
+  effectScope,
   h,
   inject,
   markRaw,
@@ -24,6 +30,8 @@ import {
   render,
   serializeInner,
   shallowRef,
+  watch,
+  watchEffect,
 } from '@vue/runtime-test'
 import type { KeepAliveProps } from '../../src/components/KeepAlive'
 
@@ -1249,5 +1257,608 @@ describe('KeepAlive', () => {
     toggle.value = true
     await nextTick()
     expect(serializeInner(root)).toBe('<p>1</p>')
+  })
+
+  describe('pause while deactivated', () => {
+    test('holds the effects of a deactivated entry until it is activated', async () => {
+      const count = ref(0)
+      const show = ref(true)
+      const log: string[] = []
+      const Leaf = {
+        setup() {
+          return () => (log.push('leaf render'), h('i', count.value))
+        },
+      }
+      const Page = {
+        setup() {
+          watch(count, () => log.push('pre watcher'))
+          watch(count, () => log.push('post watcher'), { flush: 'post' })
+          watch(count, () => log.push('sync watcher'), { flush: 'sync' })
+          watchEffect(() => log.push('watchEffect ' + count.value))
+          onActivated(() => log.push('activated'))
+          return () => (
+            log.push('page render'),
+            h('div', [count.value, h(Leaf)])
+          )
+        },
+      }
+      const App = {
+        render: () => h(KeepAlive, null, () => (show.value ? h(Page) : null)),
+      }
+      render(h(App), root)
+      show.value = false
+      await nextTick()
+      log.length = 0
+
+      count.value++
+      await nextTick()
+      count.value++
+      await nextTick()
+      expect(log).toEqual([])
+      expect(serializeInner(root)).toBe('<!---->')
+
+      show.value = true
+      await nextTick()
+      expect(serializeInner(root)).toBe('<div>2<i>2</i></div>')
+      expect(log).toEqual([
+        'sync watcher',
+        'pre watcher',
+        'watchEffect 2',
+        'page render',
+        'leaf render',
+        'post watcher',
+        'activated',
+      ])
+
+      log.length = 0
+      count.value++
+      await nextTick()
+      expect(serializeInner(root)).toBe('<div>3<i>3</i></div>')
+      expect(log).toContain('page render')
+    })
+
+    test('finishes the updates of the tick that deactivates the entry', async () => {
+      const count = ref(0)
+      const show = ref(true)
+      const log: string[] = []
+      const Page = {
+        setup() {
+          watch(count, () => log.push('pre watcher'))
+          watch(count, () => log.push('sync watcher'), { flush: 'sync' })
+          onActivated(() => log.push('activated'))
+          onDeactivated(() => log.push('deactivated'))
+          return () => (log.push('page render'), h('div', count.value))
+        },
+      }
+      const App = {
+        render: () => h(KeepAlive, null, () => (show.value ? h(Page) : null)),
+      }
+      render(h(App), root)
+      log.length = 0
+
+      count.value++
+      show.value = false
+      await nextTick()
+      expect(log).toEqual([
+        'sync watcher',
+        'pre watcher',
+        'page render',
+        'deactivated',
+      ])
+
+      log.length = 0
+      show.value = true
+      await nextTick()
+      expect(serializeInner(root)).toBe('<div>1</div>')
+      expect(log).toEqual(['activated'])
+    })
+
+    test('pauses the cached entries of a nested KeepAlive with the outer entry', async () => {
+      const count = ref(0)
+      const outer = ref(true)
+      const inner = ref('X')
+      const log: string[] = []
+      const X = {
+        name: 'X',
+        setup: () => () => (log.push('X render'), h('p', count.value)),
+      }
+      const Y = {
+        name: 'Y',
+        setup: () => () => (log.push('Y render'), h('b', count.value)),
+      }
+      const Page = {
+        setup: () => () => h(KeepAlive, () => h(inner.value === 'X' ? X : Y)),
+      }
+      const App = {
+        render: () => h(KeepAlive, null, () => (outer.value ? h(Page) : null)),
+      }
+      render(h(App), root)
+      inner.value = 'Y'
+      await nextTick()
+      outer.value = false
+      await nextTick()
+      log.length = 0
+
+      count.value++
+      await nextTick()
+      expect(log).toEqual([])
+
+      outer.value = true
+      await nextTick()
+      expect(serializeInner(root)).toBe('<b>1</b>')
+      // X was deactivated by the inner KeepAlive, which still holds it
+      expect(log).toEqual(['Y render'])
+
+      inner.value = 'X'
+      await nextTick()
+      expect(serializeInner(root)).toBe('<p>1</p>')
+      expect(log).toEqual(['Y render', 'X render'])
+    })
+
+    test.each([false, true])(
+      'mounts children of the catch-up render before activated (same turn: %s)',
+      async sameTurn => {
+        const flag = ref(false)
+        const show = ref(true)
+        const log: string[] = []
+        const Leaf = {
+          setup() {
+            onMounted(() => log.push('leaf mounted'))
+            onActivated(() => log.push('leaf activated'))
+            return () => h('i')
+          },
+        }
+        const Body = {
+          setup: () => () => h('div', [flag.value ? h(Leaf) : null]),
+        }
+        const Page = {
+          setup() {
+            onActivated(() => log.push('page activated'))
+            return () => h(Body)
+          },
+        }
+        const App = {
+          render: () => h(KeepAlive, null, () => (show.value ? h(Page) : null)),
+        }
+        render(h(App), root)
+        show.value = false
+        await nextTick()
+        log.length = 0
+
+        flag.value = true
+        if (!sameTurn) await nextTick()
+        expect(log).toEqual([])
+        show.value = true
+        await nextTick()
+        expect(serializeInner(root)).toBe('<div><i></i></div>')
+        expect(log).toEqual([
+          'leaf mounted',
+          'leaf activated',
+          'page activated',
+        ])
+      },
+    )
+
+    describe('a root replaced while the entry is paused enters on its final root', () => {
+      const selfLoading = (loaded: Ref<boolean>): Component => ({
+        setup: () => () =>
+          loaded.value ? h('article', 'content') : h('p', 'loading'),
+      })
+      const mount = (show: Ref<boolean>, log: string[], page: () => VNode) => {
+        const B = { render: () => h('b', 'B') }
+        const App = {
+          render: () =>
+            h(
+              BaseTransition,
+              {
+                onBeforeEnter: (el: any) => log.push('beforeEnter ' + el.tag),
+                onEnter: (el: any, done: () => void) => {
+                  log.push('enter ' + el.tag)
+                  done()
+                },
+                onLeave: (el: any, done: () => void) => {
+                  log.push('leave ' + el.tag)
+                  done()
+                },
+              },
+              () => h(KeepAlive, null, () => (show.value ? page() : h(B))),
+            ),
+        }
+        render(h(App), root)
+      }
+      const expectFinalRoot = (log: string[]) => {
+        expect(serializeInner(root)).toBe('<article>content</article>')
+        expect(log).not.toContain('beforeEnter p')
+        expect(log).not.toContain('enter p')
+        expect(log[log.length - 1]).toBe('enter article')
+      }
+
+      const PropsPage = {
+        props: ['loaded'],
+        setup: (props: any) => () =>
+          props.loaded ? h('article', 'content') : h('p', 'loading'),
+      }
+      const cases: [
+        string,
+        (loaded: Ref<boolean>) => Component,
+        boolean,
+        boolean?,
+      ][] = [
+        ['by its own state', selfLoading, false],
+        ['by its own state in the return turn', selfLoading, true],
+        [
+          'by a child in the return turn',
+          loaded => {
+            const Leaf = selfLoading(loaded)
+            return { setup: () => () => h(Leaf) }
+          },
+          true,
+        ],
+        ['by props', () => PropsPage, false, true],
+      ]
+      test.each(cases)('%s', async (_, makePage, sameTurn, byProps) => {
+        const loaded = ref(false)
+        const show = ref(true)
+        const log: string[] = []
+        const Page = makePage(loaded)
+        mount(show, log, () =>
+          h(Page, byProps ? { loaded: loaded.value } : null),
+        )
+        show.value = false
+        await nextTick()
+        log.length = 0
+
+        loaded.value = true
+        if (!sameTurn) await nextTick()
+        expect(log).toEqual([])
+        show.value = true
+        await nextTick()
+        await nextTick()
+        expectFinalRoot(log)
+      })
+    })
+
+    test('a pruned paused entry never runs its held effects', async () => {
+      const count = ref(0)
+      const show = ref(true)
+      const include = ref(['Page'])
+      const log: string[] = []
+      const Page = {
+        name: 'Page',
+        setup() {
+          watch(count, () => log.push('pre watcher'))
+          onUnmounted(() => log.push('unmounted'))
+          return () => (log.push('page render'), h('div', count.value))
+        },
+      }
+      const App = {
+        render: () =>
+          h(KeepAlive, { include: include.value }, () =>
+            show.value ? h(Page) : null,
+          ),
+      }
+      render(h(App), root)
+      show.value = false
+      await nextTick()
+      log.length = 0
+
+      count.value++
+      await nextTick()
+      include.value = []
+      await nextTick()
+      count.value++
+      await nextTick()
+      expect(log).toEqual(['unmounted'])
+    })
+
+    test('keeps running a shared watcher created in the setup of a paused page', async () => {
+      const count = ref(0)
+      const show = ref(true)
+      const log: string[] = []
+      const storeScope = effectScope(true)
+      let store: object | undefined
+      const useStore = () =>
+        store ||
+        (store = storeScope.run(() => {
+          watch(count, v => log.push('store watcher ' + v))
+          return {}
+        }))
+      const Page = {
+        setup() {
+          useStore()
+          return () => h('div')
+        },
+      }
+      const Other = {
+        setup() {
+          useStore()
+          return () => h('p')
+        },
+      }
+      const App = {
+        render: () =>
+          h(KeepAlive, null, () => (show.value ? h(Page) : h(Other))),
+      }
+      render(h(App), root)
+      show.value = false
+      await nextTick()
+
+      count.value++
+      await nextTick()
+      expect(log).toEqual(['store watcher 1'])
+      storeScope.stop()
+    })
+
+    test('pauses a bare effect created in the setup of a page', async () => {
+      const count = ref(0)
+      const show = ref(true)
+      const log: number[] = []
+      const Page = {
+        setup() {
+          effect(() => log.push(count.value))
+          return () => h('div')
+        },
+      }
+      const App = {
+        render: () => h(KeepAlive, null, () => (show.value ? h(Page) : null)),
+      }
+      render(h(App), root)
+      show.value = false
+      await nextTick()
+
+      count.value++
+      expect(log).toEqual([0])
+      show.value = true
+      await nextTick()
+      expect(log).toEqual([0, 1])
+    })
+
+    test.each(['sync watcher', 'render'])(
+      'puts an entry in place when its catch-up throws (%s)',
+      async source => {
+        const count = ref(0)
+        const show = ref(true)
+        const Page = {
+          setup() {
+            if (source === 'sync watcher') {
+              watch(
+                count,
+                () => {
+                  throw new Error('boom')
+                },
+                { flush: 'sync' },
+              )
+            }
+            return () => {
+              if (source === 'render' && count.value) throw new Error('boom')
+              return h('div', 'page')
+            }
+          },
+        }
+        const App = {
+          render: () => h(KeepAlive, null, () => (show.value ? h(Page) : null)),
+        }
+        render(h(App), root)
+        show.value = false
+        await nextTick()
+
+        count.value++
+        show.value = true
+        await expect(nextTick()).rejects.toThrow('boom')
+        expect(serializeInner(root)).toBe('<div>page</div>')
+        expect('Unhandled error').toHaveBeenWarned()
+      },
+    )
+
+    test('stops a catch-up that keeps updating itself', async () => {
+      const n = ref(0)
+      const show = ref(true)
+      const Page = {
+        setup() {
+          watch(n, v => {
+            if (v < 200) n.value++
+          })
+          return () => h('div')
+        },
+      }
+      const App = {
+        render: () => h(KeepAlive, null, () => (show.value ? h(Page) : null)),
+      }
+      render(h(App), root)
+      show.value = false
+      await nextTick()
+
+      n.value = 1
+      show.value = true
+      await expect(nextTick()).rejects.toMatch(
+        'Maximum recursive updates exceeded',
+      )
+      expect(n.value).toBeLessThan(200)
+      expect(serializeInner(root)).toBe('<div></div>')
+      expect('Unhandled error').toHaveBeenWarned()
+    })
+
+    test('lets the deactivated hooks close a teleported modal', async () => {
+      const show = ref(true)
+      const target = nodeOps.createElement('div')
+      const Page = {
+        setup() {
+          const open = ref(true)
+          onDeactivated(() => {
+            open.value = false
+          })
+          return () => [
+            h('div', 'page'),
+            h(Teleport, { to: target }, open.value ? [h('p', 'modal')] : []),
+          ]
+        },
+      }
+      const App = {
+        render: () => h(KeepAlive, null, () => (show.value ? h(Page) : null)),
+      }
+      render(h(App), root)
+      expect(serializeInner(target)).toBe('<p>modal</p>')
+
+      show.value = false
+      await nextTick()
+      expect(serializeInner(target)).toBe('')
+    })
+
+    test('keeps the queued jobs of other components when a catch-up throws', async () => {
+      const count = ref(0)
+      const other = ref(0)
+      const Page = {
+        setup: () => () => {
+          if (count.value) throw new Error('boom')
+          return h('div', 'page')
+        },
+      }
+      const Other = {
+        setup: () => () => h('p', other.value),
+      }
+      const App = {
+        props: ['show'],
+        setup: (props: any) => () => [
+          h(Other),
+          h(KeepAlive, null, () => (props.show ? h(Page) : null)),
+        ],
+      }
+      render(h(App, { show: true }), root)
+      render(h(App, { show: false }), root)
+      await nextTick()
+
+      count.value++
+      other.value++
+      expect(() => render(h(App, { show: true }), root)).toThrow('boom')
+      await nextTick()
+      expect(serializeInner(root)).toBe('<p>1</p><div>page</div>')
+      expect('Unhandled error').toHaveBeenWarned()
+    })
+
+    test('runs the jobs a catch-up queues for other components in order', async () => {
+      const count = ref(0)
+      const a = ref(0)
+      const b = ref(0)
+      const show = ref(true)
+      const log: string[] = []
+      const First = {
+        setup: () => () => (log.push('first'), h('i', a.value)),
+      }
+      const Second = {
+        setup: () => () => (log.push('second'), h('b', b.value)),
+      }
+      const Page = {
+        setup() {
+          watch(count, () => {
+            a.value++
+          })
+          return () => h('div')
+        },
+      }
+      // the switch comes from the parent, so `Second` is still queued when
+      // the page catches up
+      const App = {
+        render: () => {
+          const page = show.value ? h(Page) : null
+          return [h(First), h(Second), h(KeepAlive, null, () => page)]
+        },
+      }
+      render(h(App), root)
+      show.value = false
+      await nextTick()
+      count.value++
+      await nextTick()
+      log.length = 0
+
+      b.value++
+      show.value = true
+      await nextTick()
+      expect(log).toEqual(['first', 'second'])
+      expect(serializeInner(root)).toBe('<i>1</i><b>1</b><div></div>')
+    })
+
+    describe('a Suspense switching its branch on return under an out-in transition', () => {
+      const Old = { render: () => h('p', 'old') }
+      // a layout rendering only its nested view, which is `Old` until the
+      // layout returns showing `New`
+      const mount = (
+        New: Component,
+        leaveDone: boolean,
+        fallback?: () => VNode,
+      ) => {
+        const show = ref(true)
+        const view = shallowRef<Component>(Old)
+        const leaves: (() => void)[] = []
+        const Layout = {
+          setup: () => () =>
+            h(
+              BaseTransition,
+              {
+                mode: 'out-in',
+                onEnter: (_el: any, done: () => void) => done(),
+                onLeave: (_el: any, done: () => void) => void leaves.push(done),
+              },
+              () =>
+                h(
+                  Suspense,
+                  { timeout: 0 },
+                  { default: () => h(view.value), fallback },
+                ),
+            ),
+        }
+        render(
+          h({
+            render: () => [
+              h(KeepAlive, null, [show.value ? h(Layout) : null]),
+              h('b'),
+            ],
+          }),
+          root,
+        )
+        const finishLeaves = async () => {
+          leaves.splice(0).forEach(done => done())
+          await nextTick()
+        }
+        const goBack = async () => {
+          show.value = false
+          await nextTick()
+          if (leaveDone) await finishLeaves()
+          show.value = true
+          view.value = New
+          await nextTick()
+          await finishLeaves()
+        }
+        return { goBack, finishLeaves }
+      }
+
+      describe.each([
+        ['after', true],
+        ['before', false],
+      ])('returning %s its deactivation leave finished', (_, leaveDone) => {
+        test('a resolved branch', async () => {
+          const New = { render: () => h('p', 'new') }
+          const { goBack } = mount(New, leaveDone)
+          await goBack()
+          expect(serializeInner(root)).toBe('<p>new</p><b></b>')
+        })
+
+        test('a pending branch showing its fallback', async () => {
+          let resolveNew!: (comp: any) => void
+          const New = defineAsyncComponent(
+            () => new Promise<any>(r => (resolveNew = r)),
+          )
+          const { goBack, finishLeaves } = mount(New, leaveDone, () =>
+            h('i', 'loading'),
+          )
+          await goBack()
+          expect(serializeInner(root)).toBe('<i>loading</i><b></b>')
+
+          resolveNew({ render: () => h('p', 'new') })
+          await timeout()
+          await finishLeaves()
+          expect(serializeInner(root)).toBe('<p>new</p><b></b>')
+        })
+      })
+    })
   })
 })

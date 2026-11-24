@@ -593,6 +593,8 @@ function createSuspenseBoundary(
   }
 
   const initialAnchor = anchor
+  // where a fallback waiting for the active branch to leave mounts
+  let fallbackAnchor: RendererNode | null = null
   const suspense: SuspenseBoundary = {
     vnode,
     parent: parentSuspense,
@@ -659,15 +661,23 @@ function createSuspenseBoundary(
             // the meantime: the branch is gone, don't bring its DOM back
             if (pendingId === suspense.pendingId && !suspense.isUnmounted) {
               enterDeferred(suspense, pendingBranch!)
-              move(
-                pendingBranch!,
-                container,
-                anchor === initialAnchor && !hasUpdatedAnchor
-                  ? next(activeBranch!)
-                  : anchor,
-                MoveType.ENTER,
-                parentComponent,
-              )
+              // a boundary moved in the meantime took the branch along
+              if (
+                parentNode(
+                  pendingBranch!.el ||
+                    resolveAsyncComponentPlaceholder(pendingBranch!)!,
+                ) === suspense.hiddenContainer
+              ) {
+                move(
+                  pendingBranch!,
+                  container,
+                  anchor === initialAnchor && !hasUpdatedAnchor
+                    ? next(activeBranch!)
+                    : anchor,
+                  MoveType.ENTER,
+                  parentComponent,
+                )
+              }
               // still behind the ancestor that took the effects: they run
               // when it reveals the branch, not here
               let hidden = false
@@ -737,6 +747,7 @@ function createSuspenseBoundary(
       clearTimeout(suspense.timeoutTimer)
       suspense.timeoutTimer = undefined
       suspense.isFallbackMountPending = false
+      fallbackAnchor = null
       setActiveBranch(suspense, pendingBranch!)
       suspense.pendingBranch = null
       suspense.isInFallback = false
@@ -793,15 +804,16 @@ function createSuspenseBoundary(
         return
       }
 
-      const { vnode, activeBranch, parentComponent, container, namespace } =
-        suspense
+      const { vnode, activeBranch, parentComponent, namespace } = suspense
 
       // invoke @fallback event
       triggerEvent(vnode, 'onFallback')
 
-      const anchor = next(activeBranch!)
+      fallbackAnchor = next(activeBranch!)
       const mountFallback = () => {
         suspense.isFallbackMountPending = false
+        const anchor = fallbackAnchor
+        fallbackAnchor = null
         // this may run later via `afterLeave`, which is not cancelled when the
         // branch gets unmounted in the meantime.
         if (suspense.isUnmounted || !suspense.isInFallback) {
@@ -815,7 +827,7 @@ function createSuspenseBoundary(
         patch(
           null,
           latestFallback,
-          container,
+          suspense.container,
           anchor,
           parentComponent,
           null, // fallback tree will not have suspense context
@@ -830,7 +842,11 @@ function createSuspenseBoundary(
         fallbackVNode.transition && fallbackVNode.transition.mode === 'out-in'
       if (delayEnter) {
         suspense.isFallbackMountPending = true
-        activeBranch!.transition!.afterLeave = mountFallback
+        // a leave the branch was already running, e.g. from a KeepAlive
+        // deactivating it, ends here too
+        activeBranch!.transition!.afterLeave = () => {
+          if (suspense.isFallbackMountPending) mountFallback()
+        }
       }
       suspense.isInFallback = true
 
@@ -848,8 +864,15 @@ function createSuspenseBoundary(
     },
 
     move(container, anchor, type) {
-      suspense.activeBranch &&
+      if (suspense.activeBranch) {
+        // a branch leaving for the fallback only changes place: the fallback
+        // mounts where it went
+        if (suspense.isFallbackMountPending) {
+          type = MoveType.REORDER
+          fallbackAnchor = anchor
+        }
         move(suspense.activeBranch, container, anchor, type, parentComponent)
+      }
       suspense.container = container
     },
 

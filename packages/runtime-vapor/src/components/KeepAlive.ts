@@ -16,8 +16,11 @@ import {
   onBeforeUnmount,
   onMounted,
   onUpdated,
+  pauseKeepAliveEntry,
   queuePostRenderEffect,
+  requestPauseKeepAliveEntry,
   resetShapeFlag,
+  resumeKeepAliveEntry,
   warn,
   watch,
 } from '@vue/runtime-dom'
@@ -698,6 +701,10 @@ export function activate(
 ): void {
   const inputScope = instance.inputScope
   if (inputScope) inputScope.resume()
+  // its parent's update would deliver the inputs after its own catch-up
+  const inputEffect = instance.inputEffect
+  if (inputEffect && inputEffect.job) inputEffect.job()
+  const failure = resumeKeepAliveEntry(instance)
   move(instance, parentNode, anchor, MoveType.ENTER, instance, parentSuspense)
 
   queuePostRenderEffect(
@@ -714,6 +721,7 @@ export function activate(
   if (__DEV__ || __FEATURE_PROD_DEVTOOLS__) {
     devtoolsComponentAdded(instance)
   }
+  if (failure) throw failure.error
 }
 
 export function deactivate(
@@ -731,12 +739,14 @@ export function deactivate(
   invalidateMount(instance.a)
 
   move(instance, container, null, MoveType.LEAVE, instance, parentSuspense)
+  requestPauseKeepAliveEntry(instance)
 
   queuePostRenderEffect(
     () => {
       if (instance.da) invokeArrayFns(instance.da)
       invokeComponentVNodeHook(instance, 'onVnodeUnmounted')
       instance.isDeactivated = true
+      pauseKeepAliveEntry(instance)
     },
     undefined,
     parentSuspense,

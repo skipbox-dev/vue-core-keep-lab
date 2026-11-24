@@ -1570,6 +1570,61 @@ describe('api: defineAsyncComponent', () => {
     },
   )
 
+  test('template ref on an async KeepAlive entry resolved while hidden', async () => {
+    let resolve: (comp: VaporComponent) => void
+    let current: any = null
+    const onRef = vi.fn(value => {
+      current = value
+    })
+    const data = ref({ show: true, onRef })
+    const Async = defineVaporAsyncComponent(
+      () =>
+        new Promise(r => {
+          resolve = r as any
+        }),
+    )
+    const App = compile(
+      `<script setup vapor>
+        const data = _data
+        const components = _components
+      </script>
+      <template>
+        <KeepAlive>
+          <components.Async v-if="data.show" :ref="data.onRef" />
+        </KeepAlive>
+      </template>`,
+      data,
+      { Async },
+    )
+    const root = document.createElement('div')
+    const app = createVaporApp(App)
+    app.mount(root)
+    data.value.show = false
+    await nextTick()
+
+    resolve!(
+      compile(
+        `<script setup vapor>
+          defineExpose({ id: 'async' })
+        </script>
+        <template>
+          <div>async</div>
+        </template>`,
+        data,
+      ),
+    )
+    await timeout()
+    expect(current).toBe(null)
+
+    data.value.show = true
+    await nextTick()
+    expect(root.innerHTML).toBe(
+      '<div>async</div><!--async component--><!--if-->',
+    )
+    expect(current.id).toBe('async')
+    app.unmount()
+  })
+
   test.each([false, true])(
     'forwards delivered wrapper inputs without resampling them (v-once: %s)',
     async once => {

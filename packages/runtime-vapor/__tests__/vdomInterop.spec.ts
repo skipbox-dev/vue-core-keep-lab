@@ -1889,7 +1889,27 @@ describe('vdomInterop', () => {
           'created P[b] (detached) v',
           'beforeMount P[b] (detached) v',
           'mounted P[b] v',
-          // reactivation patches the cached root
+          // reactivation patches the cached root before it enters
+          'beforeUpdate DIV[a] (detached) v>v',
+          'updated DIV[a] v>v',
+          'beforeUpdate DIV[a] v>v',
+          'updated DIV[a] v>v',
+          'beforeUnmount P[b] (detached) v',
+          'beforeUnmount DIV[a] v',
+          'unmounted P[b] (detached) v',
+          'unmounted DIV[a] (detached) v',
+        ])
+        // plus the doomed `beforeUpdate` before each switch, and the
+        // reactivation patch once the root is in place
+        expect(await run(true)).toEqual([
+          'created DIV[a] (detached) v',
+          'beforeMount DIV[a] (detached) v',
+          'mounted DIV[a] v',
+          'beforeUpdate DIV[a] v>v',
+          'created P[b] (detached) v',
+          'beforeMount P[b] (detached) v',
+          'mounted P[b] v',
+          'beforeUpdate P[b] v>v',
           'beforeUpdate DIV[a] v>v',
           'updated DIV[a] v>v',
           'beforeUpdate DIV[a] v>v',
@@ -1899,11 +1919,6 @@ describe('vdomInterop', () => {
           'unmounted P[b] (detached) v',
           'unmounted DIV[a] (detached) v',
         ])
-        // plus the doomed `beforeUpdate` before each switch
-        const vapor = [...vdom]
-        vapor.splice(3, 0, 'beforeUpdate DIV[a] v>v')
-        vapor.splice(7, 0, 'beforeUpdate P[b] v>v')
-        expect(await run(true)).toEqual(vapor)
       })
 
       test('an evicted kept-alive root unmounts its directives', async () => {
@@ -2044,7 +2059,7 @@ describe('vdomInterop', () => {
         return { calls, html }
       }
 
-      test('a deactivated component keeps following its own root', async () => {
+      test('a paused component follows its own root when reactivated', async () => {
         const run = (vapor: boolean) =>
           runKeptAlive(vapor, async data => {
             data.value.view = 'B'
@@ -2071,18 +2086,13 @@ describe('vdomInterop', () => {
           'beforeMount P[b] (detached) v',
           'mounted P[b] v',
           '--',
-          // A re-renders in the cache, with its root detached
+          '--',
           'A beforeUpdate',
           'beforeUnmount DIV[a0] (detached) v',
           'created SECTION[s0] (detached) v',
           'beforeMount SECTION[s0] (detached) v',
           'unmounted DIV[a0] (detached) v',
-          'mounted SECTION[s0] (detached) v',
-          'A updated',
-          '--',
-          'A beforeUpdate',
-          'beforeUpdate SECTION[s0] v>v',
-          'updated SECTION[s0] v>v',
+          'mounted SECTION[s0] v',
           'A updated',
           'B beforeUnmount',
           'beforeUnmount P[b] (detached) v',
@@ -2102,20 +2112,16 @@ describe('vdomInterop', () => {
           'beforeMount P[b] (detached) v',
           'mounted P[b] v',
           '--',
+          '--',
+          'beforeUpdate P[b] v>v',
           'A beforeUpdate',
-          // the doomed `beforeUpdate` again: A's render replaces its root
           'beforeUpdate DIV[a0] (detached) v>v',
           'beforeUnmount DIV[a0] (detached) v',
           'created SECTION[s0] (detached) v',
           'beforeMount SECTION[s0] (detached) v',
           'unmounted DIV[a0] (detached) v',
-          'mounted SECTION[s0] (detached) v',
+          'mounted SECTION[s0] v',
           'A updated',
-          '--',
-          'beforeUpdate P[b] v>v',
-          // A has no new props, so vapor does not re-render it on reactivation
-          'beforeUpdate SECTION[s0] v>v',
-          'updated SECTION[s0] v>v',
           'B beforeUnmount',
           'beforeUnmount P[b] (detached) v',
           'A beforeUnmount',
@@ -2146,15 +2152,14 @@ describe('vdomInterop', () => {
 
         expect(await run(false)).toEqual([
           'A beforeUpdate',
-          'beforeUpdate DIV[a0] v>v',
+          'beforeUpdate DIV[a0] (detached) v>v',
           'updated DIV[a1] v>v',
           'A updated',
         ])
-        // the reactivation patch runs before the render that commits the props
         expect(await run(true)).toEqual([
           'beforeUpdate P[b] v>v',
-          'beforeUpdate DIV[a0] v>v',
           'A beforeUpdate',
+          'beforeUpdate DIV[a0] (detached) v>v',
           'updated DIV[a1] v>v',
           'A updated',
         ])
@@ -2207,7 +2212,7 @@ describe('vdomInterop', () => {
 
         expect(await run(false)).toEqual([
           'A beforeUpdate',
-          'beforeUpdate DIV[a0] v>w',
+          'beforeUpdate DIV[a0] (detached) v>w',
           'updated DIV[a0] v>w',
           'A updated',
         ])
@@ -2268,7 +2273,7 @@ describe('vdomInterop', () => {
         ])
       })
 
-      test('a deactivated component patches its root on its own update', async () => {
+      test('a paused component patches its root with its own update when reactivated', async () => {
         const run = async (vapor: boolean) => {
           const { calls } = await runKeptAlive(vapor, async data => {
             data.value.view = 'B'
@@ -2276,22 +2281,34 @@ describe('vdomInterop', () => {
             data.value.log('--')
             data.value.local++
             await nextTick()
+            data.value.log('--')
+            data.value.view = 'A'
+            await nextTick()
           })
           return calls.slice(
             calls.indexOf('--') + 1,
-            calls.indexOf('A beforeUnmount'),
+            calls.findIndex(hook => hook.endsWith(' beforeUnmount')),
           )
         }
 
-        await expectParity(run, [
+        expect(await run(false)).toEqual([
+          '--',
           'A beforeUpdate',
           'beforeUpdate DIV[a0] (detached) v>v',
-          'updated DIV[a01] (detached) v>v',
+          'updated DIV[a01] v>v',
+          'A updated',
+        ])
+        expect(await run(true)).toEqual([
+          '--',
+          'beforeUpdate P[b] v>v',
+          'A beforeUpdate',
+          'beforeUpdate DIV[a0] (detached) v>v',
+          'updated DIV[a01] v>v',
           'A updated',
         ])
       })
 
-      test('a deactivated component swaps its root with the bindings it holds', async () => {
+      test('a paused component swaps its root when reactivated', async () => {
         const run = async (vapor: boolean) => {
           const { calls } = await runKeptAlive(
             vapor,
@@ -2315,34 +2332,27 @@ describe('vdomInterop', () => {
           )
         }
 
-        const vdom = await run(false)
-        expect(vdom).toEqual([
-          'A beforeUpdate',
-          'beforeUnmount DIV[a0] (detached) v',
-          'created SECTION[s0] (detached) v',
-          'beforeMount SECTION[s0] (detached) v',
-          'unmounted DIV[a0] (detached) v',
-          'mounted SECTION[s0] (detached) v',
-          'A updated',
+        expect(await run(false)).toEqual([
           '--',
           'A beforeUpdate',
-          'beforeUpdate SECTION[s0] v>w',
-          'updated SECTION[s0] v>w',
+          'beforeUnmount DIV[a0] (detached) v',
+          'created SECTION[s0] (detached) w',
+          'beforeMount SECTION[s0] (detached) w',
+          'unmounted DIV[a0] (detached) v',
+          'mounted SECTION[s0] w',
           'A updated',
         ])
         expect(await run(true)).toEqual([
-          'A beforeUpdate',
-          'beforeUpdate DIV[a0] (detached) v>v',
-          'beforeUnmount DIV[a0] (detached) v',
-          'created SECTION[s0] (detached) v',
-          'beforeMount SECTION[s0] (detached) v',
-          'unmounted DIV[a0] (detached) v',
-          'mounted SECTION[s0] (detached) v',
-          'A updated',
           '--',
           'beforeUpdate P[b] w>w',
-          'beforeUpdate SECTION[s0] v>w',
-          'updated SECTION[s0] v>w',
+          'A beforeUpdate',
+          'beforeUpdate DIV[a0] (detached) v>w',
+          'beforeUnmount DIV[a0] (detached) v',
+          'created SECTION[s0] (detached) w',
+          'beforeMount SECTION[s0] (detached) w',
+          'unmounted DIV[a0] (detached) v',
+          'mounted SECTION[s0] w',
+          'A updated',
         ])
       })
 
@@ -2368,18 +2378,12 @@ describe('vdomInterop', () => {
           )
         }
 
-        const vdom = await run(false)
-        expect(vdom).toEqual([
+        expect(await run(false)).toEqual([
           'created P[b] (detached) w',
           'beforeMount P[b] (detached) w',
           'mounted P[b] w',
-          // A patches its root with the bindings it last received
           'A beforeUpdate',
-          'beforeUpdate DIV[a0] (detached) v>v',
-          'updated DIV[a01] (detached) v>v',
-          'A updated',
-          'A beforeUpdate',
-          'beforeUpdate DIV[a01] v>w',
+          'beforeUpdate DIV[a0] (detached) v>w',
           'updated DIV[a01] v>w',
           'A updated',
         ])
@@ -2388,13 +2392,11 @@ describe('vdomInterop', () => {
           'created P[b] (detached) w',
           'beforeMount P[b] (detached) w',
           'mounted P[b] w',
-          'A beforeUpdate',
-          'beforeUpdate DIV[a0] (detached) v>v',
-          'updated DIV[a01] (detached) v>v',
-          'A updated',
           'beforeUpdate P[b] w>w',
+          'A beforeUpdate',
           'beforeUpdate DIV[a01] v>w',
           'updated DIV[a01] v>w',
+          'A updated',
         ])
       })
 
@@ -2410,9 +2412,12 @@ describe('vdomInterop', () => {
               view.value = 'B'
               value.value = 'w'
               await nextTick()
-              // A swaps its root in the cache: the new root must carry the
-              // bindings A last received, not the ones B did
+              // A swaps its root while paused: the swap waits for it to be
+              // reactivated
               data.value.alt = true
+              await nextTick()
+              data.value.log('--')
+              view.value = 'A'
               await nextTick()
             },
           )
@@ -2422,17 +2427,17 @@ describe('vdomInterop', () => {
           )
         }
 
-        const vdom = await run(false)
-        expect(vdom).toEqual([
+        expect(await run(false)).toEqual([
           'created P[b] (detached) w',
           'beforeMount P[b] (detached) w',
           'mounted P[b] w',
+          '--',
           'A beforeUpdate',
           'beforeUnmount I[i] (detached) v',
-          'created SECTION[s0] (detached) v',
-          'beforeMount SECTION[s0] (detached) v',
+          'created SECTION[s0] (detached) w',
+          'beforeMount SECTION[s0] (detached) w',
           'unmounted I[i] (detached) v',
-          'mounted SECTION[s0] (detached) v',
+          'mounted SECTION[s0] w',
           'A updated',
         ])
         expect(await run(true)).toEqual([
@@ -2440,18 +2445,19 @@ describe('vdomInterop', () => {
           'created P[b] (detached) w',
           'beforeMount P[b] (detached) w',
           'mounted P[b] w',
+          '--',
+          'beforeUpdate P[b] w>w',
           'A beforeUpdate',
-          'beforeUpdate I[i] (detached) v>v',
           'beforeUnmount I[i] (detached) v',
-          'created SECTION[s0] (detached) v',
-          'beforeMount SECTION[s0] (detached) v',
+          'created SECTION[s0] (detached) w',
+          'beforeMount SECTION[s0] (detached) w',
           'unmounted I[i] (detached) v',
-          'mounted SECTION[s0] (detached) v',
+          'mounted SECTION[s0] w',
           'A updated',
         ])
       })
 
-      test('a deactivated component updates itself while the parent updates the active one', async () => {
+      test('a paused component holds its own update while the parent updates the active one', async () => {
         const run = async (vapor: boolean) => {
           const { calls } = await runKeptAlive(
             vapor,
@@ -2459,35 +2465,41 @@ describe('vdomInterop', () => {
               data.value.view = 'B'
               await nextTick()
               data.value.log('--')
-              // same tick: the parent patches B, A re-renders in the cache
+              // same tick: the parent patches B, A's re-render waits for its
+              // reactivation
               value.value = 'w'
               data.value.local++
+              await nextTick()
+              data.value.log('--')
+              data.value.view = 'A'
               await nextTick()
             },
           )
           return calls.slice(
             calls.indexOf('--') + 1,
-            calls.indexOf('A beforeUnmount'),
+            calls.findIndex(hook => hook.endsWith(' beforeUnmount')),
           )
         }
 
         expect(await run(false)).toEqual([
           'B beforeUpdate',
           'beforeUpdate P[b] v>w',
-          'A beforeUpdate',
-          'beforeUpdate DIV[a0] (detached) v>v',
           'updated P[b] v>w',
           'B updated',
-          'updated DIV[a01] (detached) v>v',
+          '--',
+          'A beforeUpdate',
+          'beforeUpdate DIV[a0] (detached) v>w',
+          'updated DIV[a01] v>w',
           'A updated',
         ])
-        // B has no new props, so vapor does not re-render it
         expect(await run(true)).toEqual([
           'beforeUpdate P[b] v>w',
-          'A beforeUpdate',
-          'beforeUpdate DIV[a0] (detached) v>v',
           'updated P[b] v>w',
-          'updated DIV[a01] (detached) v>v',
+          '--',
+          'beforeUpdate P[b] w>w',
+          'A beforeUpdate',
+          'beforeUpdate DIV[a0] (detached) v>w',
+          'updated DIV[a01] v>w',
           'A updated',
         ])
       })
@@ -2507,6 +2519,9 @@ describe('vdomInterop', () => {
               data.value.log('--')
               data.value.ready = true
               await nextTick()
+              data.value.log('--')
+              data.value.view = 'A'
+              await nextTick()
             },
           )
           return calls.slice(
@@ -2515,24 +2530,35 @@ describe('vdomInterop', () => {
           )
         }
 
-        const vdom = await run(false)
-        expect(vdom).toEqual([
+        expect(await run(false)).toEqual([
+          '--',
           'A beforeUpdate',
           'created DIV[a0] (detached) w',
           'beforeMount DIV[a0] (detached) w',
-          'mounted DIV[a0] (detached) w',
+          'mounted DIV[a0] w',
           'A updated',
         ])
-        expect(await run(true)).toEqual(vdom)
+        expect(await run(true)).toEqual([
+          '--',
+          'beforeUpdate P[b] w>w',
+          'A beforeUpdate',
+          'created DIV[a0] (detached) w',
+          'beforeMount DIV[a0] (detached) w',
+          'mounted DIV[a0] w',
+          'A updated',
+        ])
       })
 
-      test('a component deactivated by its parent still patches its own update in the same tick', async () => {
+      test('a component deactivated by its parent finishes its own update of the same tick', async () => {
         const run = async (vapor: boolean) => {
           const { calls } = await runKeptAlive(vapor, async data => {
             data.value.log('--')
             // same tick: the wrapper switches A out, A re-renders itself
             data.value.view = 'B'
             data.value.local++
+            await nextTick()
+            data.value.log('--')
+            data.value.view = 'A'
             await nextTick()
           })
           return calls.slice(
@@ -2541,14 +2567,18 @@ describe('vdomInterop', () => {
           )
         }
 
-        const vdom = await run(false)
-        expect(vdom).toEqual([
+        expect(await run(false)).toEqual([
           'created P[b] (detached) v',
           'beforeMount P[b] (detached) v',
           'A beforeUpdate',
           'beforeUpdate DIV[a0] (detached) v>v',
           'mounted P[b] v',
           'updated DIV[a01] (detached) v>v',
+          'A updated',
+          '--',
+          'A beforeUpdate',
+          'beforeUpdate DIV[a01] (detached) v>v',
+          'updated DIV[a01] v>v',
           'A updated',
         ])
         expect(await run(true)).toEqual([
@@ -2560,6 +2590,10 @@ describe('vdomInterop', () => {
           'mounted P[b] v',
           'updated DIV[a01] (detached) v>v',
           'A updated',
+          '--',
+          'beforeUpdate P[b] v>v',
+          'beforeUpdate DIV[a01] v>v',
+          'updated DIV[a01] v>v',
         ])
       })
 
@@ -7927,7 +7961,7 @@ describe('vdomInterop', () => {
       expect(fooFrag.inputScope!.active).toBe(false)
     })
 
-    test('should keep running the own effects of a cached VDOM child', async () => {
+    test('should hold the own effects of a cached VDOM child until it is activated', async () => {
       const run = async (vapor: boolean) => {
         const renders: string[] = []
         const external = ref('x')
@@ -7969,9 +8003,7 @@ describe('vdomInterop', () => {
         await nextTick()
         const cached = renders.slice()
 
-        // isolating the inputs must not freeze the child itself: a dependency
-        // it owns still re-renders it offscreen, only with the props frozen
-        // at the moment it was cached
+        // a dependency the child owns waits for its activation
         external.value = 'y'
         await nextTick()
         const whileCached = renders.slice()
@@ -7985,7 +8017,7 @@ describe('vdomInterop', () => {
 
       const vdom = await run(false)
       const vapor = await run(true)
-      expect(vdom.whileCached).toEqual([`1:x`, `1:y`])
+      expect(vdom.whileCached).toEqual([`1:x`])
       expect(vdom.after).toBe(`page 3 y`)
       expect(vapor.mounted).toBe(vdom.mounted)
       expect(vapor.cached).toEqual(vdom.cached)
@@ -20449,5 +20481,236 @@ describe('component scope pause across the interop boundary', () => {
     scope.resume()
     await nextTick()
     expect(html()).toContain('title="1"')
+  })
+})
+
+describe('KeepAlive pause across the interop boundary', () => {
+  const cases: [string, boolean, boolean, boolean][] = [
+    ['vdom KeepAlive, vapor page', false, true, true],
+    ['vapor KeepAlive, vdom page', true, false, false],
+    ['vdom page, vapor child', false, false, true],
+    ['vapor page, vdom child', true, true, false],
+  ]
+  test.each(cases)('%s', async (_, appVapor, pageVapor, leafVapor) => {
+    const data = ref<any>({ show: true, count: 0 })
+    const log: string[] = []
+    const components: any = { log: (s: string) => void log.push(s) }
+    const script = (vapor: boolean, body = '') =>
+      `<script setup${vapor ? ' vapor' : ''}>
+        import { watch, onActivated } from 'vue'
+        const data = _data
+        const components = _components
+        ${body}
+      </script>`
+    components.Leaf = compile(
+      script(leafVapor) +
+        `<template>
+          <i>{{ components.log('leaf') || data.count }}</i>
+        </template>`,
+      data,
+      components,
+      { vapor: leafVapor },
+    )
+    components.Page = compile(
+      script(
+        pageVapor,
+        `watch(() => data.value.count, () => components.log('pre watcher'))
+        onActivated(() => components.log('activated'))`,
+      ) +
+        `<template>
+          <div>
+            {{ components.log('page') || data.count }}
+            <components.Leaf />
+          </div>
+        </template>`,
+      data,
+      components,
+      { vapor: pageVapor },
+    )
+    const App = compile(
+      script(appVapor) +
+        `<template>
+          <KeepAlive>
+            <components.Page v-if="data.show" />
+          </KeepAlive>
+        </template>`,
+      data,
+      components,
+      { vapor: appVapor },
+    )
+    const container = document.createElement('div')
+    const app = (appVapor ? createVaporApp : createApp)(App)
+    app.use(vaporInteropPlugin).mount(container)
+    try {
+      data.value.show = false
+      await nextTick()
+      log.length = 0
+
+      data.value.count++
+      await nextTick()
+      expect(log).toEqual([])
+
+      data.value.show = true
+      await nextTick()
+      expect(container.textContent!.replace(/\s/g, '')).toBe('11')
+      expect(log).toEqual(
+        expect.arrayContaining(['pre watcher', 'page', 'leaf']),
+      )
+      expect(log[log.length - 1]).toBe('activated')
+
+      data.value.count++
+      await nextTick()
+      expect(container.textContent!.replace(/\s/g, '')).toBe('22')
+    } finally {
+      app.unmount()
+    }
+  })
+
+  test('a fresh vnode for a paused vdom page applies after it catches up', async () => {
+    const data = ref<any>({ count: 0 })
+    const log: string[] = []
+    const components: any = { log: (s: string) => void log.push(s) }
+    const Page = compile(
+      `<script setup>
+        import { watch } from 'vue'
+        const props = defineProps(['msg'])
+        const data = _data
+        const components = _components
+        watch(() => data.value.count, () => components.log('pre watcher'))
+      </script>
+      <template>
+        <div>{{ components.log('render ' + props.msg) || props.msg + data.count }}</div>
+      </template>`,
+      data,
+      components,
+      { vapor: false },
+    )
+    const Other = compile(
+      `<script setup>
+        const data = _data
+      </script>
+      <template>
+        <p>other</p>
+      </template>`,
+      data,
+      components,
+      { vapor: false },
+    )
+    data.value.view = h(Page, { msg: 'a' })
+    const App = compile(
+      `<template>
+        <KeepAlive>
+          <component :is="data.view" />
+        </KeepAlive>
+      </template>`,
+      data,
+      components,
+    )
+    const container = document.createElement('div')
+    const app = createVaporApp(App)
+    app.use(vaporInteropPlugin).mount(container)
+    try {
+      data.value.view = h(Other)
+      await nextTick()
+      log.length = 0
+
+      data.value.count++
+      await nextTick()
+      expect(log).toEqual([])
+
+      data.value.view = h(Page, { msg: 'b' })
+      await nextTick()
+      expect(container.textContent).toBe('b1')
+      expect(log[0]).toBe('pre watcher')
+    } finally {
+      app.unmount()
+    }
+  })
+
+  test('a row inserted before a vapor page whose root emptied while it was paused', async () => {
+    const data = ref<any>({ ids: ['a'], show: true, ready: true })
+    const components: any = {}
+    components.Page = compile(
+      `<template>
+        <article v-if="data.ready">x</article>
+      </template>`,
+      data,
+      components,
+    )
+    const App = compile(
+      vdomScript +
+        `<template>
+        <KeepAlive v-for="id in data.ids" :key="id">
+          <components.Page v-if="data.show" />
+        </KeepAlive>
+      </template>`,
+      data,
+      components,
+      { vapor: false },
+    )
+    const container = document.createElement('div')
+    const app = createApp(App)
+    app.use(vaporInteropPlugin).mount(container)
+    try {
+      data.value.show = false
+      await nextTick()
+      data.value.ready = false
+      await nextTick()
+      data.value.show = true
+      await nextTick()
+
+      data.value.ids = ['b', 'a']
+      data.value.ready = true
+      await nextTick()
+      expect(stripAnchors(container.innerHTML)).toBe(
+        '<article>x</article><article>x</article>',
+      )
+    } finally {
+      app.unmount()
+    }
+  })
+
+  test('a functional child of a vdom page injects from the page on return', async () => {
+    const data = ref<any>({ show: true, count: 0 })
+    const components: any = {}
+    components.Theme = () =>
+      h('i', `${inject('theme', 'none')} ${data.value.count}`)
+    components.Page = compile(
+      `<script setup>
+        import { provide } from 'vue'
+        const components = _components
+        provide('theme', 'page')
+      </script>
+      <template>
+        <components.Theme />
+      </template>`,
+      data,
+      components,
+      { vapor: false },
+    )
+    const App = compile(
+      `<template>
+        <KeepAlive>
+          <components.Page v-if="data.show" />
+        </KeepAlive>
+      </template>`,
+      data,
+      components,
+    )
+    const container = document.createElement('div')
+    const app = createVaporApp(App)
+    app.use(vaporInteropPlugin).mount(container)
+    try {
+      data.value.show = false
+      await nextTick()
+      data.value.count++
+      await nextTick()
+
+      data.value.show = true
+      await nextTick()
+      expect(stripAnchors(container.innerHTML)).toBe('<i>page 1</i>')
+    } finally {
+      app.unmount()
+    }
   })
 })
