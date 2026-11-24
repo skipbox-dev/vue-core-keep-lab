@@ -1,13 +1,15 @@
-# Skipbox keep-build lab (house account): sharded Node unit tests with coverage, 4 shards.
+# Skipbox keep-build lab (skipbox-dev, home-1 lab): sharded Node unit tests with coverage.
+# Started only by dispatch: the lab driver sends one shard per run to the lab label (one job for
+# the lab's one machine), and all four to ubuntu-latest for the GitHub-hosted comparison.
 name: keep-lab
-run-name: keep-lab ${{ github.ref_name }} on ${{ inputs.runner || 'skipbox' }} ${{ inputs.tag || github.sha }}
+run-name: keep-lab ${{ github.ref_name }} on ${{ inputs.runner }} ${{ inputs.tag }}
 on:
-  push:
-    branches: [lab-a, lab-b]
   workflow_dispatch:
     inputs:
       runner:
-        default: ubuntu-latest
+        default: skipbox-lab
+      shards:
+        default: '[1, 2, 3, 4]'
       tag:
         default: ''
 permissions:
@@ -15,14 +17,16 @@ permissions:
 jobs:
   unit:
     name: Run Node unit tests with coverage (${{ matrix.shard }}/4)
-    runs-on: ${{ inputs.runner || 'skipbox' }}
+    runs-on: ${{ inputs.runner }}
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        shard: ${{ fromJSON(inputs.shards) }}
     env:
       PUPPETEER_SKIP_DOWNLOAD: 'true'
     steps:
+      - name: Probe kept checkout
+        run: echo "LAB kept_workspace_entries=$(ls -A | wc -l) kept_root_node_modules_before_checkout=$([ -d node_modules ] && ls node_modules | wc -l || echo 0)"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -44,10 +48,10 @@ jobs:
             node_modules
             packages/*/node_modules
             packages-private/*/node_modules
-          key: nm-${{ inputs.runner || 'skipbox' }}-${{ runner.os }}-${{ github.ref_name }}-${{ hashFiles('pnpm-lock.yaml') }}
+          key: nm-${{ inputs.runner }}-${{ runner.os }}-${{ github.ref_name }}-${{ hashFiles('pnpm-lock.yaml') }}
           restore-keys: |
-            nm-${{ inputs.runner || 'skipbox' }}-${{ runner.os }}-${{ github.ref_name }}-
-            nm-${{ inputs.runner || 'skipbox' }}-${{ runner.os }}-
+            nm-${{ inputs.runner }}-${{ runner.os }}-${{ github.ref_name }}-
+            nm-${{ inputs.runner }}-${{ runner.os }}-
       - name: Install dependencies
         run: |
           echo "LAB after_restore is_odd=$([ -d node_modules/is-odd ] && echo yes || echo no)"
